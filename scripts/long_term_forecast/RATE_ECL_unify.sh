@@ -42,10 +42,8 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.1 \
-  --gamma 0.05 \
-  --delta 0.02
+
+
 python -u run_risk.py \
   --task_name long_term_forecast \
   --is_training 1 \
@@ -75,10 +73,7 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.1 \
-  --gamma 0.05 \
-  --delta 0.02
+
 python -u run_risk.py \
   --task_name long_term_forecast \
   --is_training 1 \
@@ -108,10 +103,7 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.1 \
-  --gamma 0.05 \
-  --delta 0.02
+
 python -u run_risk.py \
   --task_name long_term_forecast \
   --is_training 1 \
@@ -141,7 +133,4 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.1 \
-  --gamma 0.05 \
-  --delta 0.02
+  

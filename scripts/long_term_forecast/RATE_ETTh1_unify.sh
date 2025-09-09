@@ -37,11 +37,7 @@ python -u run_risk.py \
   --batch_size $batch_size \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
-  --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.2 \
-  --gamma 0.1 \
-  --delta 0.05
+  --down_sampling_window $down_sampling_window  
 
 python -u run_risk.py \
   --task_name long_term_forecast \
@@ -69,10 +65,6 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.2 \
-  --gamma 0.1 \
-  --delta 0.05
 
 python -u run_risk.py \
   --task_name long_term_forecast \
@@ -100,10 +92,6 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window \
-  --alpha 1.0 \
-  --beta 0.2 \
-  --gamma 0.1 \
-  --delta 0.05
 
 python -u run_risk.py \
   --task_name long_term_forecast \
@@ -131,7 +119,3 @@ python -u run_risk.py \
   --down_sampling_layers $down_sampling_layers \
   --down_sampling_method avg \
   --down_sampling_window $down_sampling_window
-  --alpha 1.0 \
-  --beta 0.1 \
-  --gamma 0.05 \
-  --delta 0.02

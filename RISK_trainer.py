@@ -4,12 +4,14 @@ from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, save_to_csv, visual_weights
 from utils.metrics import metric, MAE, MSE
+from utils.metrics import DMSE
 
 from models.Risk_core import RiskCore
 
 import torch
 import torch.nn as nn
 from torch import optim
+import math
 import os
 import time
 import warnings
@@ -23,14 +25,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         super(Exp_Long_Term_Forecast, self).__init__(args)
 
     def _build_model(self):
-
         if self.args.model == 'RATE':
             model = RiskCore(self.args).float()
         else:
             model = self.model_dict[self.args.model].Model(self.args).float()
 
         if self.args.use_multi_gpu and self.args.use_gpu:
-
+            model = nn.DataParallel(model, device_ids=self.args.device_ids)
             if len(self.args.device_ids) > 1:
                 print(f'Using {len(self.args.device_ids)} GPUs: {self.args.device_ids}')
         return model
@@ -68,20 +69,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-
-                if self.args.model == 'RiskMixer':
-
+                if self.args.model == 'RATE':
                     outputs_dict = self.model(batch_x, batch_x_mark, y_true=batch_y)
                     
-
                     loss = outputs_dict['total_loss'].mean()
                     outputs = outputs_dict['y_final']
-
+                    
                     gates = outputs_dict['gate'].detach().cpu().numpy()
                     all_gates.append(gates)
 
                 total_loss.append(loss.item())
-
                 pred_np = outputs.detach().cpu().numpy()
                 true_np = batch_y.detach().cpu().numpy()
                 all_preds.append(pred_np)
@@ -89,15 +86,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         total_loss = np.average(total_loss)
         
-
         if len(all_preds) > 0:
             all_preds = np.concatenate(all_preds, axis=0)
             all_trues = np.concatenate(all_trues, axis=0)
             val_mae = MAE(all_preds, all_trues)
             val_mse = MSE(all_preds, all_trues)
             
-
-            if self.args.model == 'RiskMixer' and all_gates:
+            if self.args.model == 'RATE' and all_gates:
                 all_gates = np.concatenate(all_gates, axis=0)
                 avg_gate = np.mean(all_gates)
                 print(f"\tValidation MAE: {val_mae:.7f}, MSE: {val_mse:.7f} | gate: {avg_gate:.3f}")
@@ -124,11 +119,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
 
-        scheduler = lr_scheduler.OneCycleLR(optimizer=model_optim,
-                                            steps_per_epoch=train_steps,
-                                            pct_start=self.args.pct_start,
-                                            epochs=self.args.train_epochs,
-                                            max_lr=self.args.learning_rate)
+        # Learning rate scheduler (optional OneCycle)
+        scheduler = None
+        if int(getattr(self.args, 'use_onecycle', 1)) == 1:
+            steps_per_epoch = math.ceil(train_steps / max(1, int(getattr(self.args, 'accumulate', 1))))
+            scheduler = lr_scheduler.OneCycleLR(
+                optimizer=model_optim,
+                steps_per_epoch=steps_per_epoch,
+                pct_start=self.args.pct_start,
+                epochs=self.args.train_epochs,
+                max_lr=self.args.learning_rate
+            )
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -136,13 +137,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
-            epoch_gate_values = []
+            epoch_gate_values = []  
+
             self.model.train()
             epoch_time = time.time()
+            accumulate_steps = max(1, int(getattr(self.args, 'accumulate', 1)))
+            clip_max_norm = float(getattr(self.args, 'clip_grad_norm', 0.0))
+            model_optim.zero_grad()
 
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 iter_count += 1
-                model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -154,7 +158,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-                if self.args.model == 'RiskMixer':
+                if self.args.model == 'RATE':
+
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
                             outputs_dict = self.model(batch_x, batch_x_mark, y_true=batch_y)
@@ -163,7 +168,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs_dict = self.model(batch_x, batch_x_mark, y_true=batch_y)
                         loss = outputs_dict['total_loss'].mean()
                     
-                    # 统计门控值使用情况
                     avg_gate = outputs_dict['gate'].mean().item()
                     epoch_gate_values.append(avg_gate)
                     
@@ -175,29 +179,31 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             true_np = batch_y.detach().cpu().numpy()
                             batch_mae = MAE(pred_np, true_np)
                             batch_mse = MSE(pred_np, true_np)
-                            avg_gates = np.mean(epoch_gate_values[-100:])
+                            avg_gates = np.mean(epoch_gate_values[-100:])  
                         
                         print("\titers: {0}, epoch: {1} | loss: {2:.7f} | MAE: {3:.7f}, MSE: {4:.7f} | gate: {5:.3f}".format(
                             i + 1, epoch + 1, loss.item(), batch_mae, batch_mse, avg_gates))
                         
-                        # 聚合不同GPU的损失分量用于打印
-                        pred_loss = outputs_dict['pred_loss'].mean().item()
-                        risk_loss = outputs_dict['risk_loss'].mean().item()
-                        fusion_loss = outputs_dict['fusion_loss'].mean().item()
-                        gate_loss = outputs_dict['gate_loss'].mean().item()
-                        
-                        print("\t  pred_loss: {0:.7f}, risk_loss: {1:.7f}, fusion_loss: {2:.7f}, gate_loss: {3:.7f}".format(
-                            pred_loss, risk_loss, fusion_loss, gate_loss))
-                        
 
-                        with torch.no_grad():
-                            if hasattr(self.model, 'module'):
-                                current_weights = torch.nn.functional.softplus(self.model.module.loss_weights)
-                            else:
-                                current_weights = torch.nn.functional.softplus(self.model.loss_weights)
-                            print("\t  learnable_weights: α={0:.4f}, β={1:.4f}, γ={2:.4f}, δ={3:.4f}".format(
-                                current_weights[0].item(), current_weights[1].item(), 
-                                current_weights[2].item(), current_weights[3].item()))
+                        def get_loss(name, default=0.0):
+                            v = outputs_dict.get(name, None)
+                            if v is None:
+                                return default
+                            try:
+                                return float(v.mean().item())
+                            except Exception:
+                                return default
+
+                        pred_loss = get_loss('pred_loss')
+                        residual_loss = get_loss('residual_loss')
+                        hf_penalty = get_loss('hf_penalty')
+                        lf_penalty = get_loss('lf_penalty')
+                        comp_loss = get_loss('comp_loss')
+                        gate_loss = get_loss('gate_loss')
+                        tv_loss = get_loss('tv_loss')
+
+                        print("\t  pred:{:.7f} | res:{:.7f} | hf:{:.7f} | lf:{:.7f} | comp:{:.7f} | gate:{:.7f} | tv:{:.7f}".format(
+                            pred_loss, residual_loss, hf_penalty, lf_penalty, comp_loss, gate_loss, tv_loss))
                         speed = (time.time() - time_now) / iter_count
                         left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                         print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
@@ -257,22 +263,31 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         time_now = time.time()
 
                 if self.args.use_amp:
-                    scaler.scale(loss).backward()
-                    scaler.step(model_optim)
-                    scaler.update()
+                    scaler.scale(loss / accumulate_steps).backward()
                 else:
-                    loss.backward()
-                    model_optim.step()
+                    (loss / accumulate_steps).backward()
 
-                if self.args.lradj == 'TST':
-                    adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
-                    scheduler.step()
+                do_step = ((i + 1) % accumulate_steps == 0) or (i + 1 == train_steps)
+                if do_step:
+                    if clip_max_norm > 0:
+                        if self.args.use_amp:
+                            scaler.unscale_(model_optim)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_max_norm)
+
+                    if self.args.use_amp:
+                        scaler.step(model_optim)
+                        scaler.update()
+                    else:
+                        model_optim.step()
+                    model_optim.zero_grad()
+
+                    if scheduler is not None and self.args.lradj == 'TST':
+                        scheduler.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
             
-            # 打印epoch平均门控值（仅RiskMixer）
-            if self.args.model == 'RiskMixer' and epoch_gate_values:
+            if self.args.model == 'RATE' and epoch_gate_values:
                 avg_epoch_gate_values = np.mean(epoch_gate_values)
                 print("Epoch {0} average gate: {1:.3f}".format(epoch + 1, avg_epoch_gate_values))
             
@@ -286,10 +301,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 print("Early stopping")
                 break
 
-            if self.args.lradj != 'TST':
-                adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=True)
-            else:
+            if scheduler is not None and self.args.lradj == 'TST':
                 print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
+            elif self.args.lradj in ['type1', 'type2', 'type3', 'PEMS']:
+                adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=True)
 
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
@@ -323,11 +338,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-                if self.args.model == 'RiskMixer':
-                    y_final, _, _, _, gate, decomposed_level, decomposed_season, decomposed_trend, decomposed_residual = self.model(batch_x, batch_x_mark)
-                    outputs = y_final
+                if self.args.model == 'RATE':
+                    y_final, y_stable, y_residual, risk_pred, gate, decomposed_level, decomposed_season, decomposed_trend, decomposed_residual = self.model(batch_x, batch_x_mark)
+                    variant = getattr(self.args, 'risk_variant', 'fused')
+                    if variant == 'stable-only':
+                        outputs = y_stable
+                    elif variant == 'residual-only':
+                        outputs = y_residual
+                    else:
+                        outputs = y_final
                     
-                    # 收集门控值
                     all_gates.append(gate.detach().cpu().numpy())
 
                 else:
@@ -337,7 +357,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     else:
                         dec_inp = None
 
-                    # encoder - decoder
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
                             if self.args.output_attention:
@@ -383,19 +402,19 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             trues = test_data.inverse_transform(trues.reshape(-1, C)).reshape(B, T, C)
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print('mse:{}, mae:{}'.format(mse, mae))
-        
-        # 计算并打印测试集门控平均值（仅RiskMixer）
-        if self.args.model == 'RiskMixer' and all_gates:
+        dmse_strength = getattr(self.args, 'dmse_strength', 4.0)
+        dmse = DMSE(preds, trues, ref=trues, strength=dmse_strength)
+        print('mse:{}, mae:{}, dmse:{} (strength={})'.format(mse, mae, dmse, dmse_strength))
+
+        avg_gate = None
+        if self.args.model == 'RATE' and all_gates:
             all_gates = np.concatenate(all_gates, axis=0)
             avg_gate = np.mean(all_gates)
             print(f"Test gate: {avg_gate:.3f}")
-        
-        # 保存测试结果到result.txt
+
         result_file = os.path.join(folder_path, 'result.txt')
         with open(result_file, 'w') as f:
-            f.write(f'mse:{mse}, mae:{mae}\n')
-            if self.args.model == 'RiskMixer' and all_gates:
+            f.write(f'mse:{mse}, mae:{mae}, dmse:{dmse}\n')
+            if avg_gate is not None:
                 f.write(f'gate:{avg_gate:.3f}\n')
-
         return

@@ -5,12 +5,10 @@ from exp.exp_anomaly_detection import Exp_Anomaly_Detection
 from exp.exp_classification import Exp_Classification
 from exp.exp_imputation import Exp_Imputation
 from exp.exp_short_term_forecasting import Exp_Short_Term_Forecast
-# 使用调整后的RISK trainer
 from RISK_trainer import Exp_Long_Term_Forecast
 import random
 import numpy as np
 
-# 添加RiskMixer模型导入
 from models import RATE
 
 fix_seed = 2021
@@ -18,15 +16,15 @@ random.seed(fix_seed)
 torch.manual_seed(fix_seed)
 np.random.seed(fix_seed)
 
-parser = argparse.ArgumentParser(description='RiskMixer')
+parser = argparse.ArgumentParser(description='RATE')
 
 # basic config
 parser.add_argument('--task_name', type=str, required=True, default='long_term_forecast',
                     help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
 parser.add_argument('--is_training', type=int, required=True, default=1, help='status')
 parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
-parser.add_argument('--model', type=str, required=True, default='RiskMixer',
-                    help='model name, options: [RiskMixer, Autoformer, Transformer, TimesNet]')
+parser.add_argument('--model', type=str, required=True, default='RATE',
+                    help='model name, options: [RATE, Autoformer, Transformer, TimesNet]')
 
 # data loader
 parser.add_argument('--data', type=str, required=True, default='ETTm1', help='dataset type')
@@ -78,14 +76,6 @@ parser.add_argument('--down_sampling_method', type=str, default='avg',
                     help='down sampling method, only support avg, max, conv')
 parser.add_argument('--use_future_temporal_feature', type=int, default=0,
                     help='whether to use future_temporal_feature; True 1 False 0')
-
-# RiskMixer specific parameters
-parser.add_argument('--alpha', type=float, default=1.0, help='main prediction loss weight')
-parser.add_argument('--beta', type=float, default=0.1, help='risk supervision loss weight')
-parser.add_argument('--gamma', type=float, default=0.05, help='fusion consistency weight')
-parser.add_argument('--delta', type=float, default=0.02, help='gate stability weight')
-parser.add_argument('--risk_threshold', type=float, default=0.5, help='risk threshold for truncation')
-
 # imputation task
 parser.add_argument('--mask_rate', type=float, default=0.125, help='mask ratio')
 
@@ -117,6 +107,22 @@ parser.add_argument('--devices', type=str, default='0,1', help='device ids of mu
 parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[128, 128],
                     help='hidden layer dimensions of projector (List)')
 parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
+
+# RATE additional knobs for Weather stabilization
+parser.add_argument('--s_max_interact', type=float, default=0.0,
+                    help='max strength of cross-variable interaction (0 disables)')
+parser.add_argument('--enable_channel_fuse', type=int, default=0,
+                    help='enable 1x1 conv channel fuse in stable predictor (1/0)')
+parser.add_argument('--stable_mlp_expansion', type=int, default=1,
+                    help='expansion factor for stable predictor MLP heads')
+
+# Optimization stability controls
+parser.add_argument('--clip_grad_norm', type=float, default=0.0,
+                    help='max norm for gradient clipping; 0 disables clipping')
+parser.add_argument('--accumulate', type=int, default=1,
+                    help='gradient accumulation steps (simulate larger batch)')
+parser.add_argument('--use_onecycle', type=int, default=1,
+                    help='use OneCycleLR (1) or disable scheduler for constant LR (0)')
 
 if __name__ == '__main__':
     args = parser.parse_args()

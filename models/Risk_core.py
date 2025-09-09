@@ -6,82 +6,95 @@ from .RATE import RATE
 
 class RiskCore(nn.Module):
 
-    
     def __init__(self, configs):
         super(RiskCore, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
-
+        
         self.risk_mixer = RATE(configs)
+        
+        self.lambda_g = 0.6               
+        self.lambda_tv = 0.01             
+        self.lambda_res = 0.015             
+        self.lambda_hf = 0.0005             
+        self.lambda_lf = 0.0005              
+        self.lambda_comp = float(getattr(configs, 'lambda_comp', 0.002))
 
-        initial_alpha = getattr(configs, 'alpha', 1.0)
-        initial_beta = getattr(configs, 'beta', 0.1)
-        initial_gamma = getattr(configs, 'gamma', 0.05)
-        initial_delta = getattr(configs, 'delta', 0.02)
 
-        self.loss_weights = nn.Parameter(torch.tensor([
-            initial_alpha, initial_beta, initial_gamma, initial_delta
-        ], dtype=torch.float32))
-
-    
     def forward(self, x_enc, x_mark_enc=None, y_true=None):
 
+
         y_final, y_stable, y_residual, risk_pred, gate, decomposed_level, decomposed_season, decomposed_trend, decomposed_residual = self.risk_mixer(x_enc, x_mark_enc)
-
+        
         if y_true is not None:
-
             L_pred = F.mse_loss(y_final, y_true)
-            
+
+            target_residual = y_true - y_stable
+            L_res = F.l1_loss(y_residual, target_residual)
 
             with torch.no_grad():
-                true_risk = torch.abs(y_true - y_stable)
-            L_risk = F.mse_loss(risk_pred, true_risk)
-            
+                dy_true = torch.abs(y_true[:, 1:, :] - y_true[:, :-1, :])
+                dy_tc = dy_true.permute(0, 2, 1)  
+                dy_tc = F.pad(dy_tc, (1, 1), mode='replicate')
+                dy_smooth = F.avg_pool1d(dy_tc, kernel_size=3, stride=1).permute(0, 2, 1)  
+                q_low = torch.quantile(dy_smooth, q=0.10, dim=1, keepdim=True)
+                q_high = torch.quantile(dy_smooth, q=0.90, dim=1, keepdim=True)
+                denom = torch.clamp(q_high - q_low, min=1e-6)
+                v = torch.clamp((dy_smooth - q_low) / denom, 0.0, 1.0)  
+                v = torch.cat([v, v[:, -1:, :]], dim=1)  
+                gate_teacher = v
 
-            with torch.no_grad():
-                y_fusion_expected = y_stable + gate * y_residual
-            L_fusion = F.mse_loss(y_final, y_fusion_expected)
-            
+            L_gate = F.l1_loss(gate, gate_teacher)
 
-            L_gate = torch.tensor(0.0, device=y_final.device)
             if self.pred_len > 1:
-                gate_diff = torch.abs(gate[:, 1:, :] - gate[:, :-1, :])
-                L_gate = gate_diff.mean()
+                tv = torch.abs(gate[:, 1:, :] - gate[:, :-1, :]).mean()
+            else:
+                tv = torch.tensor(0.0, device=y_final.device)
 
-
-            L_smoothness = torch.tensor(0.0, device=y_final.device)
             if self.pred_len > 1:
-                with torch.no_grad():
-                    stable_smoothness = torch.abs(y_stable[:, 1:, :] - y_stable[:, :-1, :]).mean()
-                    residual_smoothness = torch.abs(y_residual[:, 1:, :] - y_residual[:, :-1, :]).mean()
-                L_smoothness = F.relu(stable_smoothness - residual_smoothness)
+                y_stable_diff = y_stable[:, 1:, :] - y_stable[:, :-1, :]
+                L_hf = (y_stable_diff * y_stable_diff).mean()
+            else:
+                L_hf = torch.tensor(0.0, device=y_final.device)
+            y_res_tc = y_residual.permute(0, 2, 1) 
+            y_res_tc = F.pad(y_res_tc, (1, 1), mode='replicate')
+            y_res_low = F.avg_pool1d(y_res_tc, kernel_size=3, stride=1) 
+            y_res_low = y_res_low.permute(0, 2, 1)
+            L_lf = (y_res_low * y_res_low).mean()
+            def cosine_sq(a, b, eps: float = 1e-6):
+                # a,b: [B, T, C]
+                a2 = torch.clamp((a * a).sum(dim=1, keepdim=False), min=eps)  
+                b2 = torch.clamp((b * b).sum(dim=1, keepdim=False), min=eps)  
+                ab = (a * b).sum(dim=1, keepdim=False)                        
+                cos = ab / torch.sqrt(a2 * b2)
+                return (cos * cos).mean()
 
+            L_comp = cosine_sq(y_stable, y_residual)
 
-            weights = F.softplus(self.loss_weights)
+            L_total = (
+                L_pred
+                + self.lambda_g * L_gate
+                + self.lambda_tv * tv
+                + self.lambda_res * L_res
+                + self.lambda_hf * L_hf
+                + self.lambda_lf * L_lf
+                + self.lambda_comp * L_comp
+            )
 
-            alpha_learnable = torch.tensor(1.0, device=y_final.device, dtype=weights.dtype)
-            beta_learnable = weights[1]
-            gamma_learnable = weights[2]
-            delta_learnable = weights[3]
-            
-
-            L_total = (alpha_learnable * L_pred + 
-                       beta_learnable * L_risk + 
-                       gamma_learnable * L_fusion + 
-                       delta_learnable * L_gate + 
-                       0.01 * L_smoothness)
-            
             return {
                 'total_loss': L_total,
                 'pred_loss': L_pred,
-                'risk_loss': L_risk,
-                'fusion_loss': L_fusion,
                 'gate_loss': L_gate,
+                'tv_loss': tv,
+                'residual_loss': L_res,
+                'hf_penalty': L_hf,
+                'lf_penalty': L_lf,
+                'comp_loss': L_comp,
                 'y_final': y_final,
                 'gate': gate
             }
-
+        
         else:
             return y_final, y_stable, y_residual, risk_pred, gate, decomposed_level, decomposed_season, decomposed_trend, decomposed_residual
     
@@ -94,8 +107,7 @@ class RiskCore(nn.Module):
 
         with torch.no_grad():
             y_final, y_stable, y_residual, risk_pred, gate_values, _, _, _, _ = self.forward(x_enc, x_mark_enc)
-            
-            # 计算风险统计
+
             risk_stats = {
                 'mean_risk': risk_pred.mean().item(),
                 'max_risk': risk_pred.max().item(),
@@ -106,7 +118,6 @@ class RiskCore(nn.Module):
                 'residual_contribution': gate_values.mean().item()
             }
             
-            # 分析稳定性和波动性
             stability_analysis = {
                 'stable_variance': y_stable.var(dim=1).mean().item(),
                 'residual_variance': y_residual.var(dim=1).mean().item(),
@@ -130,10 +141,9 @@ class RiskCore(nn.Module):
 
         with torch.no_grad():
             y_final, y_stable, y_residual, risk_pred, gate_values, _, _, _, _ = self.forward(x_enc, x_mark_enc)
-            
-            # 计算各分量的贡献
-            stable_contribution = y_stable  # 稳定分量的直接贡献
-            residual_contribution = gate_values * y_residual  # 残差分量的加权贡献
+
+            stable_contribution = y_stable  
+            residual_contribution = gate_values * y_residual  
             
             decomposition = {
                 'final_prediction': y_final.cpu(),
@@ -141,40 +151,7 @@ class RiskCore(nn.Module):
                 'residual_component': residual_contribution.cpu(),
                 'gate_weights': gate_values.cpu(),
                 'risk_scores': risk_pred.cpu(),
-                # 验证：stable + weighted_residual = final
                 'reconstruction_error': torch.abs(y_final - (y_stable + gate_values * y_residual)).mean().item()
             }
         
         return decomposition
-    
-    def get_model_info(self):
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-        with torch.no_grad():
-            current_weights = F.softplus(self.loss_weights)
-        
-        model_info = {
-            'total_parameters': total_params,
-            'trainable_parameters': trainable_params,
-            'architecture': 'RiskMixer with Parallel Prediction & Risk-Aware Fusion',
-            'design_principle': 'Decompose-Parallel_Predict-Risk_Fusion',
-            'core_components': ['StablePredictor', 'UncertaintyPredictor', 'RiskAwareFusion'],
-            'loss_components': ['L_pred', 'L_risk', 'L_fusion', 'L_gate', 'L_smoothness'],
-            'loss_weights': {
-                'alpha_learnable': current_weights[0].item(),
-                'beta_learnable': current_weights[1].item(),
-                'gamma_learnable': current_weights[2].item(),
-                'delta_learnable': current_weights[3].item(),
-                'optimization_type': 'End-to-End Learnable Parameters'
-            },
-            'key_features': [
-                'One-shot parallel prediction (no autoregression)',
-                'Risk-aware dynamic fusion',
-                'Four-component decomposition (Level+Season+Trend+Residual)',
-                'Gate-controlled uncertainty integration',
-                'Adaptive loss weight optimization'
-            ]
-        }
-        
-        return model_info 
