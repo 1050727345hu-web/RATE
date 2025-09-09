@@ -4,7 +4,7 @@ from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, save_to_csv, visual_weights
 from utils.metrics import metric, MAE, MSE
-# 添加RiskCore模型导入
+
 from models.Risk_core import RiskCore
 
 import torch
@@ -23,15 +23,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         super(Exp_Long_Term_Forecast, self).__init__(args)
 
     def _build_model(self):
-        # 使用RiskCore模型替代标准模型
-        if self.args.model == 'RiskMixer':
+
+        if self.args.model == 'RATE':
             model = RiskCore(self.args).float()
         else:
             model = self.model_dict[self.args.model].Model(self.args).float()
 
         if self.args.use_multi_gpu and self.args.use_gpu:
-            model = nn.DataParallel(model, device_ids=self.args.device_ids)
-            # 确保模型参数在多GPU上均匀分布
+
             if len(self.args.device_ids) > 1:
                 print(f'Using {len(self.args.device_ids)} GPUs: {self.args.device_ids}')
         return model
@@ -69,22 +68,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-                # RiskMixer模型处理
+
                 if self.args.model == 'RiskMixer':
-                    # 直接调用 self.model (DataParallel-wrapped)
-                    # 传入 y_true 以在 forward 中并行计算损失
+
                     outputs_dict = self.model(batch_x, batch_x_mark, y_true=batch_y)
                     
-                    # DataParallel 会聚合各GPU的输出, 损失是标量, 取平均值
+
                     loss = outputs_dict['total_loss'].mean()
                     outputs = outputs_dict['y_final']
-                    
-                    # 收集门控值
+
                     gates = outputs_dict['gate'].detach().cpu().numpy()
                     all_gates.append(gates)
 
                 total_loss.append(loss.item())
-                # 收集预测和真实值用于计算MSE和MAE
+
                 pred_np = outputs.detach().cpu().numpy()
                 true_np = batch_y.detach().cpu().numpy()
                 all_preds.append(pred_np)
@@ -92,14 +89,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         total_loss = np.average(total_loss)
         
-        # 计算并打印MSE和MAE
+
         if len(all_preds) > 0:
             all_preds = np.concatenate(all_preds, axis=0)
             all_trues = np.concatenate(all_trues, axis=0)
             val_mae = MAE(all_preds, all_trues)
             val_mse = MSE(all_preds, all_trues)
             
-            # 计算并打印门控平均值（仅RiskMixer）
+
             if self.args.model == 'RiskMixer' and all_gates:
                 all_gates = np.concatenate(all_gates, axis=0)
                 avg_gate = np.mean(all_gates)
@@ -139,8 +136,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
-            epoch_gate_values = []  # 统计当前epoch的门控值
-
+            epoch_gate_values = []
             self.model.train()
             epoch_time = time.time()
 
@@ -158,9 +154,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-                # RiskMixer模型处理
                 if self.args.model == 'RiskMixer':
-                    # 直接调用 self.model, 传入 y_true 以在 forward 中并行计算损失
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
                             outputs_dict = self.model(batch_x, batch_x_mark, y_true=batch_y)
@@ -176,13 +170,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     train_loss.append(loss.item())
                     
                     if (i + 1) % 100 == 0:
-                        # 计算当前batch的MSE和MAE（基于风险融合的最终预测）
                         with torch.no_grad():
                             pred_np = outputs_dict['y_final'].detach().cpu().numpy()
                             true_np = batch_y.detach().cpu().numpy()
                             batch_mae = MAE(pred_np, true_np)
                             batch_mse = MSE(pred_np, true_np)
-                            avg_gates = np.mean(epoch_gate_values[-100:])  # 最近100个batch的平均门控值
+                            avg_gates = np.mean(epoch_gate_values[-100:])
                         
                         print("\titers: {0}, epoch: {1} | loss: {2:.7f} | MAE: {3:.7f}, MSE: {4:.7f} | gate: {5:.3f}".format(
                             i + 1, epoch + 1, loss.item(), batch_mae, batch_mse, avg_gates))
@@ -196,9 +189,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         print("\t  pred_loss: {0:.7f}, risk_loss: {1:.7f}, fusion_loss: {2:.7f}, gate_loss: {3:.7f}".format(
                             pred_loss, risk_loss, fusion_loss, gate_loss))
                         
-                        # 打印当前可学习权重值
+
                         with torch.no_grad():
-                            if hasattr(self.model, 'module'):  # DataParallel情况
+                            if hasattr(self.model, 'module'):
                                 current_weights = torch.nn.functional.softplus(self.model.module.loss_weights)
                             else:
                                 current_weights = torch.nn.functional.softplus(self.model.loss_weights)
@@ -212,14 +205,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         time_now = time.time()
                 
                 else:
-                    # 标准模型处理
                     if self.args.down_sampling_layers == 0:
                         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                     else:
                         dec_inp = None
 
-                    # encoder - decoder
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
                             if self.args.output_attention:
@@ -244,7 +235,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         train_loss.append(loss.item())
 
                     if (i + 1) % 100 == 0:
-                        # 计算当前batch的MSE和MAE
                         with torch.no_grad():
                             if self.args.use_amp:
                                 outputs_eval = outputs[:, -self.args.pred_len:, f_dim:]
@@ -333,10 +323,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     batch_x_mark = None
                     batch_y_mark = None
 
-                # RiskMixer模型处理
                 if self.args.model == 'RiskMixer':
-                    # 直接调用 self.model (DataParallel-wrapped).
-                    # 在推理模式 (y_true=None), forward 返回预测元组.
                     y_final, _, _, _, gate, decomposed_level, decomposed_season, decomposed_trend, decomposed_residual = self.model(batch_x, batch_x_mark)
                     outputs = y_final
                     

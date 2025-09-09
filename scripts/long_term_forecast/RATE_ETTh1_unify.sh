@@ -1,6 +1,6 @@
 export CUDA_VISIBLE_DEVICES=0
 
-model_name=RiskMixer
+model_name=RATE
 
 seq_len=96
 e_layers=3
@@ -9,19 +9,9 @@ down_sampling_window=1
 learning_rate=0.0002
 d_model=256
 d_ff=128
-train_epochs=80
+train_epochs=20
 patience=5
 batch_size=8
-# seq_len=96
-# e_layers=3
-# down_sampling_layers=3
-# down_sampling_window=2
-# learning_rate=0.001
-# d_model=64
-# d_ff=128
-# train_epochs=40
-# patience=15
-# batch_size=8
 python -u run_risk.py \
   --task_name long_term_forecast \
   --is_training 1 \

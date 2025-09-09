@@ -11,7 +11,7 @@ import random
 import numpy as np
 
 # 添加RiskMixer模型导入
-from models import RiskMixer
+from models import RATE
 
 fix_seed = 2021
 random.seed(fix_seed)
